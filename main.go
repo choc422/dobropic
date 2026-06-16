@@ -26,8 +26,6 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const adminID int64 = 1076036643
-
 type bwMode int
 
 const (
@@ -37,16 +35,25 @@ const (
 )
 
 var (
-	userModes = make(map[int64]bwMode)
-	modesMu   sync.RWMutex
-	httpCli   *http.Client
-	db        *sql.DB
+	adminIDs   = make(map[int64]bool)
+	userModes  = make(map[int64]bwMode)
+	modesMu    sync.RWMutex
+	httpCli    *http.Client
+	db         *sql.DB
 )
 
 func main() {
 	godotenv.Load()
 
 	token := os.Getenv("token")
+
+	// Parse admin IDs from env
+	for _, idStr := range strings.Split(os.Getenv("admin_ids"), ",") {
+		idStr = strings.TrimSpace(idStr)
+		if id, err := strconv.ParseInt(idStr, 10, 64); err == nil && id > 0 {
+			adminIDs[id] = true
+		}
+	}
 
 	initDB()
 
@@ -75,16 +82,24 @@ func main() {
 
 	b.SetMyCommands(ctx, &bot.SetMyCommandsParams{
 		Commands: []models.BotCommand{
-			{Command: "start", Description: "Запуск бота (ЛС)"},
+			{Command: "start", Description: "Запуск бота"},
 			{Command: "help", Description: "Помощь"},
-			{Command: "bw", Description: "Обычный ЧБ (в группе)"},
-			{Command: "bwl", Description: "Светлый ЧБ (в группе)"},
-			{Command: "bwd", Description: "Тёмный ЧБ (в группе)"},
+			{Command: "profile", Description: "Мой профиль"},
+			{Command: "myphotos", Description: "Мои фото"},
+			{Command: "top", Description: "Топ пользователей"},
+			{Command: "mode", Description: "Текущий режим"},
+			{Command: "bw", Description: "Обычный ЧБ (группа)"},
+			{Command: "bwl", Description: "Светлый ЧБ (группа)"},
+			{Command: "bwd", Description: "Тёмный ЧБ (группа)"},
 		},
 		Scope: &models.BotCommandScopeDefault{},
 	})
 
 	b.Start(ctx)
+}
+
+func isAdmin(id int64) bool {
+	return adminIDs[id]
 }
 
 func initDB() {
@@ -160,6 +175,17 @@ func modeEmoji(m bwMode) string {
 	}
 }
 
+func modeDesc(m bwMode) string {
+	switch m {
+	case bwLight:
+		return "Светлый — высветляет яркие участки, эффект свечения"
+	case bwDark:
+		return "Тёмный — усиливает тени, глубина и контраст"
+	default:
+		return "Обычный — стандартная чёрно-белая конвертация"
+	}
+}
+
 func queryInt(query string, args ...any) int {
 	var val int
 	db.QueryRow(query, args...).Scan(&val)
@@ -176,6 +202,20 @@ func fmtTime(s string) string {
 	return s
 }
 
+func fmtName(firstName, username sql.NullString, uid int64) string {
+	name := ""
+	if firstName.Valid {
+		name = firstName.String
+	}
+	if username.Valid {
+		name += " @" + username.String
+	}
+	if name == "" {
+		name = fmt.Sprintf("ID %d", uid)
+	}
+	return name
+}
+
 // ──────────────────── KEYBOARDS ────────────────────
 
 func replyKeyboard(userID int64) models.ReplyKeyboardMarkup {
@@ -185,9 +225,14 @@ func replyKeyboard(userID int64) models.ReplyKeyboardMarkup {
 			{Text: "☀️ Светлый"},
 			{Text: "🌑 Тёмный"},
 		},
+		{
+			{Text: "👤 Профиль"},
+			{Text: "📸 Мои фото"},
+			{Text: "🏆 Топ"},
+		},
 	}
 
-	if userID == adminID {
+	if isAdmin(userID) {
 		rows = append(rows, []models.KeyboardButton{
 			{Text: "📊 Статистика"},
 			{Text: "📸 Фото"},
@@ -204,7 +249,8 @@ func replyKeyboard(userID int64) models.ReplyKeyboardMarkup {
 
 func statusText(userID int64) string {
 	mode := getMode(userID)
-	return fmt.Sprintf("Режим: %s %s\nОтправь фото в любой чат с ботом.", modeEmoji(mode), modeName(mode))
+	photoCount := queryInt("SELECT COUNT(*) FROM events WHERE user_id=? AND event_type='photo'", userID)
+	return fmt.Sprintf("Режим: %s %s\nФото отправлено: %d\nОтправь фото в любой чат с ботом.", modeEmoji(mode), modeName(mode), photoCount)
 }
 
 // ──────────────────── HANDLER ────────────────────
@@ -228,12 +274,9 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 			b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: update.MyChatMember.Chat.ID,
 				Text: "Привет! Я конвертирую фото в чёрно-белое.\n\n" +
-					"Команды:\n" +
-					"/bw — обычный ЧБ\n" +
-					"/bwl — светлый ЧБ\n" +
-					"/bwd — тёмный ЧБ\n\n" +
+					"Команды:\n/bw /bwl /bwd — режимы ЧБ\n\n" +
 					"⚠️ Дайте мне права админа чтобы я видел фото!\n\n" +
-					"Также работ Inline Mode — наберите @dobropic_bot в любом чате.",
+					"Inline: @dobropic_bot в любом чате.",
 			})
 		}
 	}
@@ -243,7 +286,6 @@ func handleMessage(ctx context.Context, b *bot.Bot, msg *models.Message) {
 	user := msg.From
 	text := msg.Text
 
-	// Strip @bot mention in groups: "@dobropic_bot /bw" -> "/bw"
 	if msg.Chat.Type != "private" && strings.HasPrefix(text, "@") {
 		if idx := strings.Index(text, " "); idx > 0 {
 			text = strings.TrimSpace(text[idx:])
@@ -256,36 +298,20 @@ func handleMessage(ctx context.Context, b *bot.Bot, msg *models.Message) {
 	}
 	logEvent(user.ID, user.Username, user.FirstName, user.LastName, string(msg.Chat.Type), msg.Chat.ID, msg.ID, "message", fileID)
 
-	// Group commands: /bw /bwl /bwd
+	// Group commands: /bw /bwl /bwd (work for everyone)
 	if msg.Chat.Type != "private" {
-		switch {
-		case text == "/bw" || text == "/bwl" || text == "/bwd":
-			if user.ID == adminID {
-				switch text {
-				case "/bw":
-					setMode(user.ID, bwNormal)
-					sendReply(ctx, b, msg, "Режим: 🔘 Обычный")
-				case "/bwl":
-					setMode(user.ID, bwLight)
-					sendReply(ctx, b, msg, "Режим: ☀️ Светлый")
-				case "/bwd":
-					setMode(user.ID, bwDark)
-					sendReply(ctx, b, msg, "Режим: 🌑 Тёмный")
-				}
-				return
-			}
-			// Non-admin: reply only in group, visible only to user (via reply)
-			switch text {
-			case "/bw":
-				setMode(user.ID, bwNormal)
-				sendReply(ctx, b, msg, fmt.Sprintf("%s: 🔘 Обычный", user.FirstName))
-			case "/bwl":
-				setMode(user.ID, bwLight)
-				sendReply(ctx, b, msg, fmt.Sprintf("%s: ☀️ Светлый", user.FirstName))
-			case "/bwd":
-				setMode(user.ID, bwDark)
-				sendReply(ctx, b, msg, fmt.Sprintf("%s: 🌑 Тёмный", user.FirstName))
-			}
+		switch text {
+		case "/bw":
+			setMode(user.ID, bwNormal)
+			sendReply(ctx, b, msg, fmt.Sprintf("%s: 🔘 Обычный", user.FirstName))
+			return
+		case "/bwl":
+			setMode(user.ID, bwLight)
+			sendReply(ctx, b, msg, fmt.Sprintf("%s: ☀️ Светлый", user.FirstName))
+			return
+		case "/bwd":
+			setMode(user.ID, bwDark)
+			sendReply(ctx, b, msg, fmt.Sprintf("%s: 🌑 Тёмный", user.FirstName))
 			return
 		}
 	}
@@ -306,7 +332,7 @@ func handlePrivateMessage(ctx context.Context, b *bot.Bot, msg *models.Message, 
 	user := msg.From
 
 	// Admin commands with args
-	if user.ID == adminID {
+	if isAdmin(user.ID) {
 		if strings.HasPrefix(text, "/view ") {
 			handleViewPhoto(ctx, b, msg)
 			return
@@ -339,35 +365,38 @@ func handlePrivateMessage(ctx context.Context, b *bot.Bot, msg *models.Message, 
 		setMode(user.ID, bwDark)
 		sendReply(ctx, b, msg, "Режим: 🌑 Тёмный")
 		return
+	case "👤 Профиль":
+		showProfile(ctx, b, msg)
+		return
+	case "📸 Мои фото":
+		showMyPhotos(ctx, b, msg)
+		return
+	case "🏆 Топ":
+		showTop(ctx, b, msg)
+		return
 	case "📊 Статистика":
-		if user.ID != adminID {
+		if !isAdmin(user.ID) {
 			return
 		}
 		showAdminStats(ctx, b, msg)
 		return
 	case "📸 Фото":
-		if user.ID != adminID {
+		if !isAdmin(user.ID) {
 			return
 		}
 		showAdminPhotos(ctx, b, msg)
 		return
 	case "👥 Юзеры":
-		if user.ID != adminID {
+		if !isAdmin(user.ID) {
 			return
 		}
 		showAdminUsers(ctx, b, msg)
 		return
 	case "📋 Логи":
-		if user.ID != adminID {
+		if !isAdmin(user.ID) {
 			return
 		}
 		showAdminLog(ctx, b, msg)
-		return
-	case "🔍 Юзер":
-		if user.ID != adminID {
-			return
-		}
-		sendReply(ctx, b, msg, "Введите: /userphotos 123456\nили: /userphotos @username")
 		return
 	}
 
@@ -383,15 +412,16 @@ func handlePrivateMessage(ctx context.Context, b *bot.Bot, msg *models.Message, 
 	case "/help":
 		b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: msg.Chat.ID,
-			Text: "📸 Отправь фото в любой чат с ботом — получи ЧБ версию.\n\n" +
-				"Команды в группах:\n" +
-				"/bw — обычный ЧБ\n" +
-				"/bwl — светлый ЧБ\n" +
-				"/bwd — тёмный ЧБ\n\n" +
-				"Inline mode (без добавления в группу):\n" +
-				"@dobropic_bot — последние фото\n" +
-				"@dobropic_bot @username — фото пользователя\n" +
-				"@dobropic_bot 123 456 — фото по ID",
+			Text: "📸 Конвертация фото в чёрно-белое\n\n" +
+				"Отправь фото — получи ЧБ версию.\n\n" +
+				"Команды:\n" +
+				"/profile — твой профиль\n" +
+				"/myphotos — твои фото\n" +
+				"/top — топ пользователей\n" +
+				"/mode — текущий режим\n" +
+				"/bw /bwl /bwd — смена режима\n" +
+				"/deleteme — удалить мои данные\n\n" +
+				"Inline: @dobropic_bot в любом чате",
 			ReplyMarkup: replyKeyboard(user.ID),
 		})
 		return
@@ -403,26 +433,42 @@ func handlePrivateMessage(ctx context.Context, b *bot.Bot, msg *models.Message, 
 			ReplyMarkup: replyKeyboard(user.ID),
 		})
 		return
+	case "/profile":
+		showProfile(ctx, b, msg)
+		return
+	case "/myphotos":
+		showMyPhotos(ctx, b, msg)
+		return
+	case "/top":
+		showTop(ctx, b, msg)
+		return
+	case "/mode":
+		mode := getMode(user.ID)
+		sendReply(ctx, b, msg, fmt.Sprintf("Текущий режим: %s %s\n%s", modeEmoji(mode), modeName(mode), modeDesc(mode)))
+		return
+	case "/deleteme":
+		handleDeleteMe(ctx, b, msg)
+		return
 	case "/stats":
-		if user.ID != adminID {
+		if !isAdmin(user.ID) {
 			return
 		}
 		showAdminStats(ctx, b, msg)
 		return
 	case "/users":
-		if user.ID != adminID {
+		if !isAdmin(user.ID) {
 			return
 		}
 		showAdminUsers(ctx, b, msg)
 		return
 	case "/log":
-		if user.ID != adminID {
+		if !isAdmin(user.ID) {
 			return
 		}
 		showAdminLog(ctx, b, msg)
 		return
 	case "/photos":
-		if user.ID != adminID {
+		if !isAdmin(user.ID) {
 			return
 		}
 		showAdminPhotos(ctx, b, msg)
@@ -442,6 +488,155 @@ func sendReply(ctx context.Context, b *bot.Bot, msg *models.Message, text string
 			MessageID: msg.ID,
 		},
 	})
+}
+
+// ──────────────────── USER COMMANDS ────────────────────
+
+func showProfile(ctx context.Context, b *bot.Bot, msg *models.Message) {
+	user := msg.From
+	mode := getMode(user.ID)
+
+	photoCount := queryInt("SELECT COUNT(*) FROM events WHERE user_id=? AND event_type='photo'", user.ID)
+	totalEvents := queryInt("SELECT COUNT(*) FROM events WHERE user_id=?", user.ID)
+	chatsUsed := queryInt("SELECT COUNT(DISTINCT chat_id) FROM events WHERE user_id=?", user.ID)
+
+	var firstSeen, lastSeen string
+	db.QueryRow(`SELECT MIN(created_at), MAX(created_at) FROM events WHERE user_id=?`, user.ID).Scan(&firstSeen, &lastSeen)
+
+	name := user.FirstName
+	if user.LastName != "" {
+		name += " " + user.LastName
+	}
+
+	text := fmt.Sprintf(`👤 Профиль
+
+Имя: %s
+ID: %d
+Username: @%s
+
+Режим: %s %s
+%s
+
+📸 Фото: %d
+📊 Всего событий: %d
+💬 Чатов: %d
+📅 Первый вход: %s
+📅 Последний вход: %s`,
+		name, user.ID, user.Username,
+		modeEmoji(mode), modeName(mode), modeDesc(mode),
+		photoCount, totalEvents, chatsUsed,
+		fmtTime(firstSeen), fmtTime(lastSeen))
+
+	b.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: text, ReplyParameters: &models.ReplyParameters{MessageID: msg.ID}})
+}
+
+func showMyPhotos(ctx context.Context, b *bot.Bot, msg *models.Message) {
+	user := msg.From
+
+	rows, err := db.Query(`SELECT id, file_id, chat_id, created_at
+		FROM events WHERE user_id=? AND event_type='photo'
+		ORDER BY id DESC LIMIT 20`, user.ID)
+	if err != nil {
+		sendReply(ctx, b, msg, "Ошибка.")
+		return
+	}
+	defer rows.Close()
+
+	type entry struct {
+		id       int
+		fileID   string
+		chatID   int64
+		time     string
+	}
+	var photos []entry
+	for rows.Next() {
+		var e entry
+		rows.Scan(&e.id, &e.fileID, &e.chatID, &e.time)
+		photos = append(photos, e)
+	}
+
+	if len(photos) == 0 {
+		sendReply(ctx, b, msg, "У тебя пока нет фото. Отправь мне фото в любом чате!")
+		return
+	}
+
+	total := queryInt("SELECT COUNT(*) FROM events WHERE user_id=? AND event_type='photo'", user.ID)
+
+	text := fmt.Sprintf("📸 Твои фото: %d всего\n\n", total)
+
+	keyboard := [][]models.InlineKeyboardButton{}
+	limit := len(photos)
+	if limit > 15 {
+		limit = 15
+	}
+
+	for i := 0; i < limit; i++ {
+		p := photos[i]
+		keyboard = append(keyboard, []models.InlineKeyboardButton{
+			{Text: fmt.Sprintf("#%d %s chat:%d", p.id, fmtTime(p.time), p.chatID), CallbackData: fmt.Sprintf("viewphoto_%d", p.id)},
+		})
+	}
+
+	if total > 15 {
+		text += fmt.Sprintf("Показаны последние 15 из %d.\n\n", total)
+	}
+
+	text += "Нажми кнопку чтобы посмотреть фото."
+
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:      msg.Chat.ID,
+		Text:        text,
+		ReplyMarkup: models.InlineKeyboardMarkup{InlineKeyboard: keyboard},
+		ReplyParameters: &models.ReplyParameters{MessageID: msg.ID},
+	})
+}
+
+func showTop(ctx context.Context, b *bot.Bot, msg *models.Message) {
+	rows, err := db.Query(`SELECT user_id, username, first_name, COUNT(*) as cnt
+		FROM events WHERE event_type='photo'
+		GROUP BY user_id ORDER BY cnt DESC LIMIT 10`)
+	if err != nil {
+		sendReply(ctx, b, msg, "Ошибка.")
+		return
+	}
+	defer rows.Close()
+
+	text := "🏆 Топ пользователей по фото:\n\n"
+	place := 1
+	medals := []string{"🥇", "🥈", "🥉"}
+
+	for rows.Next() {
+		var uid int64
+		var username, firstName sql.NullString
+		var cnt int
+		rows.Scan(&uid, &username, &firstName, &cnt)
+
+		medal := fmt.Sprintf("#%d", place)
+		if place <= 3 {
+			medal = medals[place-1]
+		}
+
+		name := fmtName(firstName, username, uid)
+		text += fmt.Sprintf("%s %s — %d фото\n", medal, name, cnt)
+		place++
+	}
+
+	sendReply(ctx, b, msg, text)
+}
+
+func handleDeleteMe(ctx context.Context, b *bot.Bot, msg *models.Message) {
+	user := msg.From
+
+	result, err := db.Exec(`DELETE FROM events WHERE user_id=?`, user.ID)
+	if err != nil {
+		sendReply(ctx, b, msg, "Ошибка удаления.")
+		return
+	}
+
+	affected, _ := result.RowsAffected()
+	setMode(user.ID, bwNormal)
+
+	sendReply(ctx, b, msg, fmt.Sprintf("Удалено %d записей. Данные очищены.", affected))
 }
 
 // ──────────────────── CALLBACKS ────────────────────
@@ -467,7 +662,7 @@ func handleCallback(ctx context.Context, b *bot.Bot, cb *models.CallbackQuery) {
 }
 
 func sendUserPhotosList(ctx context.Context, b *bot.Bot, cb *models.CallbackQuery, targetID int64) {
-	if cb.From.ID != adminID {
+	if !isAdmin(cb.From.ID) {
 		b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID, Text: "Нет доступа", ShowAlert: true})
 		return
 	}
@@ -475,20 +670,7 @@ func sendUserPhotosList(ctx context.Context, b *bot.Bot, cb *models.CallbackQuer
 	var uname, firstName, lastName sql.NullString
 	db.QueryRow(`SELECT username, first_name, last_name FROM events WHERE user_id=? LIMIT 1`, targetID).Scan(&uname, &firstName, &lastName)
 
-	name := ""
-	if firstName.Valid {
-		name = firstName.String
-	}
-	if lastName.Valid {
-		name += " " + lastName.String
-	}
-	if name == "" {
-		name = fmt.Sprintf("ID %d", targetID)
-	}
-	unameStr := ""
-	if uname.Valid {
-		unameStr = " @" + uname.String
-	}
+	name := fmtName(firstName, uname, targetID)
 
 	rows, err := db.Query(`SELECT id, file_id, chat_id, created_at
 		FROM events WHERE user_id=? AND event_type='photo'
@@ -517,7 +699,7 @@ func sendUserPhotosList(ctx context.Context, b *bot.Bot, cb *models.CallbackQuer
 		return
 	}
 
-	text := fmt.Sprintf("📸 Фото от %s%s (ID: %d) — %d шт.\n\n", name, unameStr, targetID, len(photos))
+	text := fmt.Sprintf("📸 Фото от %s (ID: %d) — %d шт.\n\n", name, targetID, len(photos))
 
 	keyboard := [][]models.InlineKeyboardButton{}
 	limit := len(photos)
@@ -548,7 +730,7 @@ func sendUserPhotosList(ctx context.Context, b *bot.Bot, cb *models.CallbackQuer
 }
 
 func banByID(ctx context.Context, b *bot.Bot, cb *models.CallbackQuery, targetID int64) {
-	if cb.From.ID != adminID {
+	if !isAdmin(cb.From.ID) {
 		b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID, Text: "Нет доступа", ShowAlert: true})
 		return
 	}
@@ -570,11 +752,6 @@ func banByID(ctx context.Context, b *bot.Bot, cb *models.CallbackQuery, targetID
 }
 
 func sendPhotoByEventID(ctx context.Context, b *bot.Bot, cb *models.CallbackQuery, eventID int) {
-	if cb.From.ID != adminID {
-		b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID, Text: "Нет доступа", ShowAlert: true})
-		return
-	}
-
 	var fileID string
 	var uid int64
 	var uname, firstName sql.NullString
@@ -593,14 +770,13 @@ func sendPhotoByEventID(ctx context.Context, b *bot.Bot, cb *models.CallbackQuer
 		return
 	}
 
-	name := ""
-	if firstName.Valid {
-		name = firstName.String
-	}
-	if uname.Valid {
-		name += " @" + uname.String
+	// Owner or admin can view
+	if cb.From.ID != uid && !isAdmin(cb.From.ID) {
+		b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID, Text: "Нет доступа", ShowAlert: true})
+		return
 	}
 
+	name := fmtName(firstName, uname, uid)
 	caption := fmt.Sprintf("#%d | %s | %s | chat %d", eventID, fmtTime(createdAt), name, chatID)
 
 	b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID})
@@ -619,15 +795,11 @@ func handleInlineQuery(ctx context.Context, b *bot.Bot, iq *models.InlineQuery) 
 	var results []models.InlineQueryResult
 
 	if query == "" {
-		// Empty query → show last 20 photos
 		rows, err := db.Query(`SELECT id, file_id, user_id, username, first_name, chat_id, created_at
 			FROM events WHERE event_type='photo' AND file_id != ''
 			ORDER BY id DESC LIMIT 20`)
 		if err != nil {
-			b.AnswerInlineQuery(ctx, &bot.AnswerInlineQueryParams{
-				InlineQueryID: iq.ID,
-				Results:       []models.InlineQueryResult{},
-			})
+			b.AnswerInlineQuery(ctx, &bot.AnswerInlineQueryParams{InlineQueryID: iq.ID, Results: []models.InlineQueryResult{}})
 			return
 		}
 		defer rows.Close()
@@ -653,15 +825,11 @@ func handleInlineQuery(ctx context.Context, b *bot.Bot, iq *models.InlineQuery) 
 			})
 		}
 	} else if strings.HasPrefix(query, "@") {
-		// @username → photos from that user
 		username := strings.TrimPrefix(query, "@")
 		var targetID int64
 		err := db.QueryRow(`SELECT user_id FROM events WHERE username=? LIMIT 1`, username).Scan(&targetID)
 		if err != nil {
-			b.AnswerInlineQuery(ctx, &bot.AnswerInlineQueryParams{
-				InlineQueryID: iq.ID,
-				Results:       []models.InlineQueryResult{},
-			})
+			b.AnswerInlineQuery(ctx, &bot.AnswerInlineQueryParams{InlineQueryID: iq.ID, Results: []models.InlineQueryResult{}})
 			return
 		}
 
@@ -669,10 +837,7 @@ func handleInlineQuery(ctx context.Context, b *bot.Bot, iq *models.InlineQuery) 
 			FROM events WHERE user_id=? AND event_type='photo' AND file_id != ''
 			ORDER BY id DESC LIMIT 20`, targetID)
 		if err != nil {
-			b.AnswerInlineQuery(ctx, &bot.AnswerInlineQueryParams{
-				InlineQueryID: iq.ID,
-				Results:       []models.InlineQueryResult{},
-			})
+			b.AnswerInlineQuery(ctx, &bot.AnswerInlineQueryParams{InlineQueryID: iq.ID, Results: []models.InlineQueryResult{}})
 			return
 		}
 		defer rows.Close()
@@ -698,7 +863,6 @@ func handleInlineQuery(ctx context.Context, b *bot.Bot, iq *models.InlineQuery) 
 			})
 		}
 	} else {
-		// Try as comma-separated IDs: "10 16 24" or "10,16,24"
 		ids := strings.FieldsFunc(query, func(r rune) bool { return r == ' ' || r == ',' || r == ';' })
 
 		for _, idStr := range ids {
@@ -743,20 +907,6 @@ func handleInlineQuery(ctx context.Context, b *bot.Bot, iq *models.InlineQuery) 
 		CacheTime:     60,
 		IsPersonal:    true,
 	})
-}
-
-func fmtName(firstName, username sql.NullString, uid int64) string {
-	name := ""
-	if firstName.Valid {
-		name = firstName.String
-	}
-	if username.Valid {
-		name += " @" + username.String
-	}
-	if name == "" {
-		name = fmt.Sprintf("ID %d", uid)
-	}
-	return name
 }
 
 // ──────────────────── PHOTO PROCESSING ────────────────────
@@ -904,7 +1054,6 @@ func showAdminUsers(ctx context.Context, b *bot.Bot, msg *models.Message) {
 	defer rows.Close()
 
 	text := "👥 Пользователи:\n\n"
-
 	keyboard := [][]models.InlineKeyboardButton{}
 
 	for rows.Next() {
@@ -915,23 +1064,9 @@ func showAdminUsers(ctx context.Context, b *bot.Bot, msg *models.Message) {
 
 		rows.Scan(&uid, &username, &firstName, &lastName, &cnt, &lastSeen)
 
-		name := ""
-		if firstName.Valid {
-			name = firstName.String
-		}
-		if lastName.Valid {
-			name += " " + lastName.String
-		}
-		if name == "" {
-			name = "(нет имени)"
-		}
+		name := fmtName(firstName, username, uid)
 
-		uname := ""
-		if username.Valid {
-			uname = " @" + username.String
-		}
-
-		text += fmt.Sprintf("%d | %s%s | %d | %s\n", uid, name, uname, cnt, fmtTime(lastSeen))
+		text += fmt.Sprintf("%d | %s | %d | %s\n", uid, name, cnt, fmtTime(lastSeen))
 
 		keyboard = append(keyboard, []models.InlineKeyboardButton{
 			{Text: fmt.Sprintf("📸 %s", name), CallbackData: fmt.Sprintf("uphotos_%d", uid)},
@@ -964,17 +1099,7 @@ func showAdminLog(ctx context.Context, b *bot.Bot, msg *models.Message) {
 
 		rows.Scan(&uid, &username, &firstName, &eventType, &chatType, &createdAt)
 
-		name := ""
-		if firstName.Valid {
-			name = firstName.String
-		}
-		if username.Valid {
-			name += " @" + username.String
-		}
-		if name == "" {
-			name = fmt.Sprintf("ID %d", uid)
-		}
-
+		name := fmtName(firstName, username, uid)
 		text += fmt.Sprintf("%s [%s] %s — %s\n", fmtTime(createdAt), chatType, name, eventType)
 	}
 
@@ -1002,17 +1127,7 @@ func showAdminPhotos(ctx context.Context, b *bot.Bot, msg *models.Message) {
 
 		rows.Scan(&eventID, &uid, &username, &firstName, &chatID, &createdAt)
 
-		name := ""
-		if firstName.Valid {
-			name = firstName.String
-		}
-		if username.Valid {
-			name += " @" + username.String
-		}
-		if name == "" {
-			name = fmt.Sprintf("ID %d", uid)
-		}
-
+		name := fmtName(firstName, username, uid)
 		text += fmt.Sprintf("#%d | %s | %s | chat %d\n", eventID, fmtTime(createdAt), name, chatID)
 
 		keyboard = append(keyboard, []models.InlineKeyboardButton{
@@ -1062,14 +1177,7 @@ func handleViewPhoto(ctx context.Context, b *bot.Bot, msg *models.Message) {
 			continue
 		}
 
-		name := ""
-		if firstName.Valid {
-			name = firstName.String
-		}
-		if uname.Valid {
-			name += " @" + uname.String
-		}
-
+		name := fmtName(firstName, uname, uid)
 		caption := fmt.Sprintf("#%d | %s | %s | chat %d", eventID, fmtTime(createdAt), name, chatID)
 
 		b.SendPhoto(ctx, &bot.SendPhotoParams{
@@ -1112,20 +1220,7 @@ func handleUserPhotos(ctx context.Context, b *bot.Bot, msg *models.Message) {
 	var uname, firstName, lastName sql.NullString
 	db.QueryRow(`SELECT username, first_name, last_name FROM events WHERE user_id=? LIMIT 1`, targetID).Scan(&uname, &firstName, &lastName)
 
-	name := ""
-	if firstName.Valid {
-		name = firstName.String
-	}
-	if lastName.Valid {
-		name += " " + lastName.String
-	}
-	if name == "" {
-		name = fmt.Sprintf("ID %d", targetID)
-	}
-	unameStr := ""
-	if uname.Valid {
-		unameStr = " @" + uname.String
-	}
+	name := fmtName(firstName, uname, targetID)
 
 	rows, err := db.Query(`SELECT id, file_id, chat_id, created_at
 		FROM events WHERE user_id=? AND event_type='photo'
@@ -1155,7 +1250,7 @@ func handleUserPhotos(ctx context.Context, b *bot.Bot, msg *models.Message) {
 		return
 	}
 
-	text := fmt.Sprintf("📸 Фото от %s%s (ID: %d) — %d шт.\n\n", name, unameStr, targetID, len(photos))
+	text := fmt.Sprintf("📸 Фото от %s (ID: %d) — %d шт.\n\n", name, targetID, len(photos))
 
 	keyboard := [][]models.InlineKeyboardButton{}
 	limit := len(photos)
