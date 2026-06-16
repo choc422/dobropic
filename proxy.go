@@ -112,17 +112,20 @@ func startXrayAndProxy() (*http.Client, func()) {
 	configPath := filepath.Join(xrayDir, "xray_config.json")
 	os.WriteFile(configPath, []byte(configJSON), 0644)
 
-	// Find xray binary
+	// Find xray binary: system path > workDir/xray > download
 	xrayBin := "xray"
-	xrayPath := filepath.Join(xrayDir, xrayBin)
-	if _, err := os.Stat(xrayPath); os.IsNotExist(err) {
-		xrayPath = filepath.Join(xrayDir, "xray.exe")
+	xrayPath, err := exec.LookPath(xrayBin)
+	if err != nil {
+		xrayPath = filepath.Join(xrayDir, xrayBin)
 		if _, err := os.Stat(xrayPath); os.IsNotExist(err) {
-			fmt.Println("Downloading xray-core...")
-			if err := downloadXray(xrayPath); err != nil {
-				fmt.Printf("Failed to download xray: %v\n", err)
-				fmt.Println("Using direct connection")
-				return http.DefaultClient, func() {}
+			xrayPath = filepath.Join(xrayDir, "xray.exe")
+			if _, err := os.Stat(xrayPath); os.IsNotExist(err) {
+				fmt.Println("Downloading xray-core...")
+				if err := downloadXray(xrayPath); err != nil {
+					fmt.Printf("Failed to download xray: %v\n", err)
+					fmt.Println("Using direct connection")
+					return http.DefaultClient, func() {}
+				}
 			}
 		}
 	}
