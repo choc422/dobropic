@@ -1,9 +1,10 @@
 module bot
 
-go 1.25
+go 1.25.0
 
 require (
 	github.com/go-telegram/bot v1.21.0 // indirect
 	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/mattn/go-sqlite3 v1.14.45 // indirect
+	golang.org/x/net v0.56.0 // indirect
 )

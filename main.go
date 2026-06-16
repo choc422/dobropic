@@ -12,7 +12,6 @@ import (
 	"image/png"
 	"math"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -39,6 +38,7 @@ var (
 	userModes = make(map[int64]bwMode)
 	modesMu   sync.RWMutex
 	httpCli   *http.Client
+	cleanup   func()
 	db        *sql.DB
 )
 
@@ -56,14 +56,8 @@ func main() {
 
 	initDB()
 
-	transport := &http.Transport{}
-	if proxyURL := os.Getenv("proxy"); proxyURL != "" {
-		u, err := url.Parse(proxyURL)
-		if err == nil {
-			transport.Proxy = http.ProxyURL(u)
-		}
-	}
-	httpCli = &http.Client{Transport: transport}
+	httpCli, cleanup = startXrayAndProxy()
+	defer cleanup()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()

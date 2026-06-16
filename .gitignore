@@ -5,3 +5,4 @@ bot_data.db-shm
 *.exe
 .idea/
 .kilo/
+xray_config.json
