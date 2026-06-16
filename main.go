@@ -82,11 +82,11 @@ func main() {
 
 	b.SetMyCommands(ctx, &bot.SetMyCommandsParams{
 		Commands: []models.BotCommand{
-			{Command: "start", Description: "Запуск бота"},
+			{Command: "start", Description: "Запуск бота (ЛС)"},
 			{Command: "help", Description: "Помощь"},
-			{Command: "bw", Description: "Обычный ЧБ"},
-			{Command: "bwl", Description: "Светлый ЧБ"},
-			{Command: "bwd", Description: "Тёмный ЧБ"},
+			{Command: "bw", Description: "Обычный ЧБ (в группе)"},
+			{Command: "bwl", Description: "Светлый ЧБ (в группе)"},
+			{Command: "bwd", Description: "Тёмный ЧБ (в группе)"},
 		},
 		Scope: &models.BotCommandScopeDefault{},
 	})
@@ -239,9 +239,12 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 			b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: update.MyChatMember.Chat.ID,
 				Text: "Привет! Я конвертирую фото в чёрно-белое.\n\n" +
-					"Ответь на фото командой /bw — получи ЧБ версию.\n\n" +
-					"/bw — обычный\n/bwl — светлый\n/bwd — тёмный\n\n" +
-					"Inline: @dobropic_bot в любом чате.",
+					"Команды:\n" +
+					"/bw — обычный ЧБ\n" +
+					"/bwl — светлый ЧБ\n" +
+					"/bwd — тёмный ЧБ\n\n" +
+					"⚠️ Дайте мне права админа чтобы я видел фото!\n\n" +
+					"Также работ Inline Mode — наберите @dobropic_bot в любом чате.",
 			})
 		}
 	}
@@ -266,26 +269,34 @@ func handleMessage(ctx context.Context, b *bot.Bot, msg *models.Message) {
 
 	// Group commands: /bw /bwl /bwd
 	if msg.Chat.Type != "private" {
-		switch text {
-		case "/bw", "/bwl", "/bwd":
-			var mode bwMode
-			switch text {
-			case "/bw":
-				mode = bwNormal
-			case "/bwl":
-				mode = bwLight
-			case "/bwd":
-				mode = bwDark
-			}
-			setMode(user.ID, mode)
-
-			// Reply to a photo → process it
-			if msg.ReplyToMessage != nil && len(msg.ReplyToMessage.Photo) > 0 {
-				processReplyPhoto(ctx, b, msg, msg.ReplyToMessage, mode)
+		switch {
+		case text == "/bw" || text == "/bwl" || text == "/bwd":
+			if isAdmin(user.ID) {
+				switch text {
+				case "/bw":
+					setMode(user.ID, bwNormal)
+					sendReply(ctx, b, msg, "Режим: 🔘 Обычный")
+				case "/bwl":
+					setMode(user.ID, bwLight)
+					sendReply(ctx, b, msg, "Режим: ☀️ Светлый")
+				case "/bwd":
+					setMode(user.ID, bwDark)
+					sendReply(ctx, b, msg, "Режим: 🌑 Тёмный")
+				}
 				return
 			}
-
-			sendReply(ctx, b, msg, fmt.Sprintf("%s: %s %s", user.FirstName, modeEmoji(mode), modeName(mode)))
+			// Non-admin: reply only in group, visible only to user (via reply)
+			switch text {
+			case "/bw":
+				setMode(user.ID, bwNormal)
+				sendReply(ctx, b, msg, fmt.Sprintf("%s: 🔘 Обычный", user.FirstName))
+			case "/bwl":
+				setMode(user.ID, bwLight)
+				sendReply(ctx, b, msg, fmt.Sprintf("%s: ☀️ Светлый", user.FirstName))
+			case "/bwd":
+				setMode(user.ID, bwDark)
+				sendReply(ctx, b, msg, fmt.Sprintf("%s: 🌑 Тёмный", user.FirstName))
+			}
 			return
 		}
 	}
@@ -304,24 +315,6 @@ func handleMessage(ctx context.Context, b *bot.Bot, msg *models.Message) {
 
 func handlePrivateMessage(ctx context.Context, b *bot.Bot, msg *models.Message, text string) {
 	user := msg.From
-
-	// Reply to photo with /bw /bwl /bwd → process that photo
-	if msg.ReplyToMessage != nil && len(msg.ReplyToMessage.Photo) > 0 {
-		switch text {
-		case "/bw":
-			setMode(user.ID, bwNormal)
-			processReplyPhoto(ctx, b, msg, msg.ReplyToMessage, bwNormal)
-			return
-		case "/bwl":
-			setMode(user.ID, bwLight)
-			processReplyPhoto(ctx, b, msg, msg.ReplyToMessage, bwLight)
-			return
-		case "/bwd":
-			setMode(user.ID, bwDark)
-			processReplyPhoto(ctx, b, msg, msg.ReplyToMessage, bwDark)
-			return
-		}
-	}
 
 	// Admin commands with args
 	if isAdmin(user.ID) {
@@ -381,6 +374,12 @@ func handlePrivateMessage(ctx context.Context, b *bot.Bot, msg *models.Message, 
 		}
 		showAdminLog(ctx, b, msg)
 		return
+	case "🔍 Юзер":
+		if !isAdmin(user.ID) {
+			return
+		}
+		sendReply(ctx, b, msg, "Введите: /userphotos 123456\nили: /userphotos @username")
+		return
 	}
 
 	// Commands
@@ -395,14 +394,15 @@ func handlePrivateMessage(ctx context.Context, b *bot.Bot, msg *models.Message, 
 	case "/help":
 		b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: msg.Chat.ID,
-			Text: "📸 Конвертация фото в чёрно-белое\n\n" +
-				"Отправь фото боту в ЛС — получи ЧБ версию.\n" +
-				"Ответь на фото в группе командой /bw — получи ЧБ.\n\n" +
-				"Команды:\n" +
+			Text: "📸 Отправь фото в любой чат с ботом — получи ЧБ версию.\n\n" +
+				"Команды в группах:\n" +
 				"/bw — обычный ЧБ\n" +
 				"/bwl — светлый ЧБ\n" +
 				"/bwd — тёмный ЧБ\n\n" +
-				"Inline: @dobropic_bot в любом чате",
+				"Inline mode (без добавления в группу):\n" +
+				"@dobropic_bot — последние фото\n" +
+				"@dobropic_bot @username — фото пользователя\n" +
+				"@dobropic_bot 123 456 — фото по ID",
 			ReplyMarkup: replyKeyboard(user.ID),
 		})
 		return
@@ -413,18 +413,6 @@ func handlePrivateMessage(ctx context.Context, b *bot.Bot, msg *models.Message, 
 			Text:        "Режим сброшен на обычный.",
 			ReplyMarkup: replyKeyboard(user.ID),
 		})
-		return
-	case "/bw":
-		setMode(user.ID, bwNormal)
-		sendReply(ctx, b, msg, "Режим: 🔘 Обычный")
-		return
-	case "/bwl":
-		setMode(user.ID, bwLight)
-		sendReply(ctx, b, msg, "Режим: ☀️ Светлый")
-		return
-	case "/bwd":
-		setMode(user.ID, bwDark)
-		sendReply(ctx, b, msg, "Режим: 🌑 Тёмный")
 		return
 	case "/stats":
 		if !isAdmin(user.ID) {
@@ -820,48 +808,6 @@ func processPhoto(ctx context.Context, b *bot.Bot, msg *models.Message) {
 		Photo:  &models.InputFileUpload{Data: bytes.NewReader(buf.Bytes())},
 		ReplyParameters: &models.ReplyParameters{
 			MessageID: msg.ID,
-		},
-	})
-}
-
-func processReplyPhoto(ctx context.Context, b *bot.Bot, cmdMsg *models.Message, photoMsg *models.Message, mode bwMode) {
-	photo := photoMsg.Photo[len(photoMsg.Photo)-1]
-
-	file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: photo.FileID})
-	if err != nil {
-		sendReply(ctx, b, cmdMsg, "Ошибка скачивания фото.")
-		return
-	}
-
-	imgData, err := downloadFile(file.FilePath)
-	if err != nil {
-		sendReply(ctx, b, cmdMsg, "Ошибка загрузки фото.")
-		return
-	}
-
-	logEvent(cmdMsg.From.ID, cmdMsg.From.Username, cmdMsg.From.FirstName, cmdMsg.From.LastName, string(cmdMsg.Chat.Type), cmdMsg.Chat.ID, cmdMsg.ID, "photo_reply", photo.FileID)
-
-	img, imgType, err := decodeImage(imgData)
-	if err != nil {
-		sendReply(ctx, b, cmdMsg, "Не удалось декодировать фото.")
-		return
-	}
-
-	bwImg := toGrayscale(img, mode)
-
-	var buf bytes.Buffer
-	switch imgType {
-	case "png":
-		png.Encode(&buf, bwImg)
-	default:
-		jpeg.Encode(&buf, bwImg, &jpeg.Options{Quality: 95})
-	}
-
-	b.SendPhoto(ctx, &bot.SendPhotoParams{
-		ChatID: cmdMsg.Chat.ID,
-		Photo:  &models.InputFileUpload{Data: bytes.NewReader(buf.Bytes())},
-		ReplyParameters: &models.ReplyParameters{
-			MessageID: cmdMsg.ID,
 		},
 	})
 }
