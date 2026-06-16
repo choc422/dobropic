@@ -1,0 +1,7 @@
+.env
+bot_data.db
+bot_data.db-wal
+bot_data.db-shm
+.exe
+.idea/
+.kilo/
