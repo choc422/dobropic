@@ -65,7 +65,7 @@ func main() {
 	opts := []bot.Option{
 		bot.WithDefaultHandler(handler),
 		bot.WithHTTPClient(30*time.Second, httpCli),
-		bot.WithAllowedUpdates([]string{"message", "callback_query", "my_chat_member"}),
+		bot.WithAllowedUpdates([]string{"message", "callback_query", "my_chat_member", "inline_query"}),
 	}
 
 	var b *bot.Bot
@@ -255,6 +255,10 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	}
 	if update.CallbackQuery != nil {
 		handleCallback(ctx, b, update.CallbackQuery)
+		return
+	}
+	if update.InlineQuery != nil {
+		handleInlineQuery(ctx, b, update.InlineQuery)
 		return
 	}
 	if update.MyChatMember != nil {
@@ -604,6 +608,37 @@ func adminUsersCallback(ctx context.Context, b *bot.Bot, cb *models.CallbackQuer
 	b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: inner.Chat.ID,
 		Text:   text,
+	})
+}
+
+// ──────────────────── INLINE MODE ────────────────────
+
+func handleInlineQuery(ctx context.Context, b *bot.Bot, iq *models.InlineQuery) {
+	mode := getMode(iq.From.ID)
+
+	result := &models.InlineQueryResultArticle{
+		ID:    "mode",
+		Title: fmt.Sprintf("Режим: %s %s", modeEmoji(mode), modeName(mode)),
+		Description: "Нажми чтобы сменить режим ЧБ конвертации",
+		ReplyMarkup: &models.InlineKeyboardMarkup{
+			InlineKeyboard: [][]models.InlineKeyboardButton{
+				{
+					{Text: "🔘 Обычный", CallbackData: "setmode_0"},
+					{Text: "☀️ Светлый", CallbackData: "setmode_1"},
+					{Text: "🌑 Тёмный", CallbackData: "setmode_2"},
+				},
+			},
+		},
+		InputMessageContent: &models.InputTextMessageContent{
+			MessageText: fmt.Sprintf("Текущий режим: %s %s\nОтправь фото в любой чат с ботом.", modeEmoji(mode), modeName(mode)),
+		},
+	}
+
+	b.AnswerInlineQuery(ctx, &bot.AnswerInlineQueryParams{
+		InlineQueryID: iq.ID,
+		Results:       []models.InlineQueryResult{result},
+		CacheTime:     0,
+		IsPersonal:    true,
 	})
 }
 

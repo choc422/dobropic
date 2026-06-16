@@ -135,7 +135,7 @@ func startXrayAndProxy() (*http.Client, func()) {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
-		fmt.Printf("Failed to start xray: %v\n")
+		fmt.Printf("Failed to start xray: %v\n", err)
 		return http.DefaultClient, func() {}
 	}
 
