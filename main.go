@@ -92,9 +92,18 @@ func isAdmin(id int64) bool {
 	return adminIDs[id]
 }
 
+func getDataDir() string {
+	dir := os.Getenv("DATA_DIR")
+	if dir == "" {
+		dir = getWorkDir()
+	}
+	os.MkdirAll(dir, 0755)
+	return dir
+}
+
 func initDB() {
 	var err error
-	db, err = sql.Open("sqlite3", "bot_data.db?_journal_mode=WAL")
+	db, err = sql.Open("sqlite3", getDataDir()+"/bot_data.db?_journal_mode=WAL")
 	if err != nil {
 		panic(err)
 	}

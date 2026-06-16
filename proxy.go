@@ -60,6 +60,13 @@ func startXrayAndProxy() (*http.Client, func()) {
 	}
 
 	socksPort := "10808"
+	workDir := getWorkDir()
+
+	// xray dir: try /app/xray first (Docker), then workDir
+	xrayDir := filepath.Join(workDir, "xray")
+	if _, err := os.Stat(xrayDir); os.IsNotExist(err) {
+		xrayDir = workDir
+	}
 
 	configJSON := fmt.Sprintf(`{
   "log": {"loglevel": "none"},
@@ -102,17 +109,21 @@ func startXrayAndProxy() (*http.Client, func()) {
   ]
 }`, socksPort, server, port, uuid, sni, fp, pbk, sid)
 
-	configPath := filepath.Join(getWorkDir(), "xray_config.json")
+	configPath := filepath.Join(xrayDir, "xray_config.json")
 	os.WriteFile(configPath, []byte(configJSON), 0644)
 
-	// Find or download xray
-	xrayPath := filepath.Join(getWorkDir(), "xray.exe")
+	// Find xray binary
+	xrayBin := "xray"
+	xrayPath := filepath.Join(xrayDir, xrayBin)
 	if _, err := os.Stat(xrayPath); os.IsNotExist(err) {
-		fmt.Println("Downloading xray-core...")
-		if err := downloadXray(xrayPath); err != nil {
-			fmt.Printf("Failed to download xray: %v\n", err)
-			fmt.Println("Using direct connection")
-			return http.DefaultClient, func() {}
+		xrayPath = filepath.Join(xrayDir, "xray.exe")
+		if _, err := os.Stat(xrayPath); os.IsNotExist(err) {
+			fmt.Println("Downloading xray-core...")
+			if err := downloadXray(xrayPath); err != nil {
+				fmt.Printf("Failed to download xray: %v\n", err)
+				fmt.Println("Using direct connection")
+				return http.DefaultClient, func() {}
+			}
 		}
 	}
 

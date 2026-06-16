@@ -6,3 +6,6 @@ bot_data.db-shm
 .idea/
 .kilo/
 xray_config.json
+xray_err.txt
+data/
+xray/
