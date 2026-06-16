@@ -68,9 +68,19 @@ func main() {
 		bot.WithAllowedUpdates([]string{"message", "callback_query", "my_chat_member"}),
 	}
 
-	b, err := bot.New(token, opts...)
-	if err != nil {
-		panic(err)
+	var b *bot.Bot
+	for i := 0; ; i++ {
+		var err error
+		b, err = bot.New(token, opts...)
+		if err == nil {
+			break
+		}
+		wait := time.Duration(1<<min(i, 6)) * time.Second
+		if wait > 60*time.Second {
+			wait = 60 * time.Second
+		}
+		fmt.Printf("Bot init failed (attempt %d), retrying in %v: %v\n", i+1, wait, err)
+		time.Sleep(wait)
 	}
 
 	b.SetMyCommands(ctx, &bot.SetMyCommandsParams{
